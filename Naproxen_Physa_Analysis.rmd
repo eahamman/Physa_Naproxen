@@ -1,0 +1,295 @@
+---
+title: "The effects of naproxen sodium on the growth, reproduction, survival, and feeding of a freshwater pond snail"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+# Packages and data reading
+
+```{r}
+library(tidyverse) # formatting and tidying data
+library(glmmTMB) # performing glmms
+library(DHARMa) # model validation
+library(survival) # survival analysis
+library(ggplot2) # creating figures
+library(scales)
+library(dplyr)
+
+Data <- read.csv("Naproxen_Physa_rawdat.csv") # read in data
+color_pal <- rev(viridis_pal()(4))
+
+```
+
+
+
+# SnailGrowth
+
+Snails were measured from apex to base with calipers once a week for the month long experiment.  The data was analyzed using a linear mixed effects model with snail as a random effect and Week and Treatment as fixed effects.  
+
+```{r Growth}
+Growth_data <- Data %>%
+  dplyr::select(Treatment,Snail,Week,Length,Status) %>%
+  filter(Status=="alive") %>% 
+  mutate(Week = paste("Week",Week,sep="")) %>%
+  group_by(Treatment,Snail) %>%
+  pivot_wider(names_from=Week,values_from=Length) %>%
+  mutate(Growth1 = (Week1-Week0),
+         Growth2 = (Week2-Week1),
+         Growth3 = (Week3-Week2),
+         Growth4 = (Week4-Week3)
+  ) %>%
+  dplyr::select(-c(Week0,Week1,Week2,Week3,Week4))%>%
+  pivot_longer(cols = Growth1:Growth4,names_to="Week",values_to="Growth") %>%
+  mutate(Week = str_replace(Week, 'Growth', ""),
+         Week = as.numeric(Week))
+
+
+Week1 <- Growth_data %>% filter(Week==1)
+mean(Week1$Growth)
+
+OtherWeeks <- Growth_data %>% filter(Week!=1)
+mean(OtherWeeks$Growth,na.rm=TRUE)
+
+
+# Fitting the model
+mod_growth <- glmmTMB(Growth~Week*Treatment+I(Week^2) + (1|Snail), data=Growth_data) 
+summary(mod_growth)
+
+# Model validation
+simulationOutput <- simulateResiduals(fittedModel = mod_growth, plot = T) 
+## Note: Including the quadratic term in the model greatly reduced but did not completely eliminate issues with quantile deviations
+
+# Plotting the data
+Growth_data$TreamentPlot <- factor(Growth_data$Treatment,levels=expression())
+
+growth_plot <- ggplot(Growth_data,aes(x=Week,y=Growth,fill=Treatment,group=interaction(Treatment,Week)))+
+  geom_boxplot()+
+  theme_classic()+
+  ylab("Growth rate (mm)")+
+  scale_fill_manual(values=color_pal,
+                    labels = c(expression(paste(0," ",mu,"g/L")),
+                               expression(paste(100," ",mu,"g/L")),
+                               expression(paste(1000," ",mu,"g/L")),
+                               expression(paste(10000," ",mu,"g/L")))
+                    )+
+ # theme(legend.position=c(.9,.8))
+  theme(legend.position="none")
+```
+
+# Survival
+Performing the survival analysis using a Cox proportional hazards model implemented in the "survival" R package.  
+
+
+## Data manipulation
+Before the analysis, we removed data from after a snail had died and formatted the data for the survival analysis (a dataset of death events and censure times)
+
+```{r Survival}
+SurvData <- Data %>%
+  mutate(Treatment=factor(Treatment)) %>%
+  mutate(Death = case_when(Status == "alive" ~ 0, # code survival numerically
+                           Status == "dead" ~ 1))%>%
+  na.omit(Length) # remove entries after snail has died
+
+# Create a data set of events and censored times (when snail survives the entire experiment)
+
+Survival_df<- c()
+for(i in 1:40){
+  
+  subdat <- SurvData %>% filter(Snail==i)
+  
+  if(length(which(subdat$Status=="dead"))!=0){ # if the snail dies, record the death event
+    keep_line <- subdat[which(subdat$Status=="dead"),]}
+  if(length(which(subdat$Status=="dead"))==0){ # if the snail survives, record the final sample time
+    keep_line <- subdat[nrow(subdat),]}
+  
+  Survival_df <- rbind(Survival_df,keep_line)
+}
+```
+
+## Performing the survival analysis
+
+We performed a survival analysis using a cox proportional hazards model.  To address differences among treatments, we used nested helmet contrasts asking
+
+1) Does naproxen (at all levels) affect survival relative to the control?
+
+2) Do higher than observed levels of naproxen affect snail survival moreso than observed levels?
+
+3) Does the highest level of naproxen affect snail survival mroeso than the second highest?
+
+
+```{r Survival Contrasts}
+SurvData$TreatmentContrasts <- SurvData$Treatment # create a separate column for contrasts
+contrasts(SurvData$TreatmentContrasts) <- contr.helmert(4) # create the nested helmert contrasts
+overall_surv <- Surv(SurvData$Week,SurvData$Death) # create the survival object
+
+fit <- coxph(Surv(Week, Death)~TreatmentContrasts, data=SurvData)
+fit
+```
+
+
+## Creating the plot
+```{r Survival_Fig}
+Survival_plotdat <- Data %>%
+  mutate(Alive = case_when(Status == "dead" ~ "0", #redoing the numeric coding so Alive is 1 
+                           Status == "alive" ~ "1"),
+         Alive = as.numeric(Alive)
+  ) %>%
+  filter(Week !=0) %>%
+  group_by(Treatment,Week) %>%
+  dplyr::summarize(
+    Sum_alive = sum(Alive),
+    Prop_alive = mean(Alive),
+    SD_alive = sd(Alive),
+    SE_alive = SD_alive/sqrt(length(Alive)),
+    se_binom = sqrt(Prop_alive*(1-Prop_alive)/length(Alive))
+  )
+
+
+pd=position_dodge(.5)
+
+surv_plot <- ggplot(Survival_plotdat, aes(x=Week,y=Prop_alive,color=Treatment))+
+  geom_point(size=4,position=pd)+
+  geom_errorbar(aes(ymin=Prop_alive-se_binom,ymax=Prop_alive+se_binom),position=pd,width=.2)+
+  theme_classic()+
+  labs(y="Proportion of snails alive")+
+    scale_color_manual(values=color_pal,
+                    labels = c(expression(paste(0," ",mu,"g/L")),
+                               expression(paste(100," ",mu,"g/L")),
+                               expression(paste(1000," ",mu,"g/L")),
+                               expression(paste(10000," ",mu,"g/L")))
+                    )+
+  #theme(legend.position=c(.9,.8))
+  theme(legend.position="none")
+```
+
+# Reproduction (number of egg masses)
+
+We recorded the number of eggs per snail each week.  Because these are counts, we used a Poisson glmm to analyze the data.  
+
+## Analysis
+
+```{r Reproduction}
+EggData <- Data %>% filter(Week!=0) %>% filter(Status=="alive")
+
+
+Week1 <- EggData %>% filter(Week==1)
+mean(Week1$Egg.Sacs)
+
+Week4 <- EggData %>% filter(Week==4)
+mean(Week4$Egg.Sacs)
+
+# glmm
+model_eggs <- glmmTMB(Egg.Sacs ~ Week*Treatment + (1 | Snail),
+                data = EggData,
+                family="poisson")
+
+summary(model_eggs)
+
+# model validation
+simulationOutput <- simulateResiduals(fittedModel = model_eggs, plot = T)
+
+```
+
+## Making the figure
+```{r Reproduction_fig}
+reproduction_plot <- ggplot(EggData,aes(x=Week,y=Egg.Sacs,fill=Treatment,group=interaction(Treatment,Week)))+
+  geom_boxplot()+
+  ylab("Number of egg sacs")+
+  theme_classic()+
+    scale_fill_manual(values=color_pal,
+                    labels = c(expression(paste(0," ",mu,"g/L")),
+                               expression(paste(100," ",mu,"g/L")),
+                               expression(paste(1000," ",mu,"g/L")),
+                               expression(paste(10000," ",mu,"g/L")))
+                    )+
+  theme(legend.position=c(.8,.8))
+```
+
+
+## Combined Demographics plot 
+```{r}
+library(cowplot)
+
+p_1 <- plot_grid(growth_plot,reproduction_plot,surv_plot,ncol=3,labels=c("A","B","C"))
+
+ggsave(p_1,filename="DemographicResults.eps",device="eps",width=7.5,height=3)
+```
+
+
+# Feeding
+
+Feeding data was collected throughout the experiment. We were unable to quantify the amount of food, but were able to note when food was consumed or not, so the data are presented as a  binary outcome.  
+
+## Formatting the data
+```{r Feeding}
+Start = as.Date("2023-02-04") #Beginning of the experiment
+
+Feeding_data <- read.csv("Feeding_data.csv") %>% # read in feeding data and convert dates to days of the experiment
+  mutate(Date = mdy(Date),
+         Day = as.numeric(Date-Start),
+         Fed = case_when(Food == "no" ~ 0, # changing fed to numeric
+                         Food == "yes" ~ 1)
+  ) %>%
+  na.omit() # remove snails that died
+
+
+mean(Feeding_data$Fed)
+```       
+
+## Performing the analysis
+```{r}
+
+# model & analysis
+mod_feeding <- glmmTMB(Fed~Day*Treatment + (1|Snail),data=Feeding_data,family="binomial")
+summary(mod_feeding)
+
+L4 <- Feeding_data %>% filter(Treatment=="L4")
+otherlevels <- Feeding_data %>% filter(Treatment!="L4")
+
+(mean(otherlevels$Fed)-mean(L4$Fed))/(mean(otherlevels$Fed))
+
+
+
+# model validation
+simulationOutput <- simulateResiduals(fittedModel = mod_feeding, plot = T)
+testDispersion(simulationOutput)
+
+```
+
+
+## Making the plot
+```{r}
+Feeding_plotdat <- Feeding_data %>%
+  group_by(Treatment,Day) %>%
+  dplyr::summarize(
+    Prop_fed = mean(Fed),
+    SD_fed = sd(Fed),
+    SE_fed = SD_fed/sqrt(length(Fed)),
+    se_binom = sqrt(Prop_fed*(1-Prop_fed)/length(Fed))
+  )
+
+pd=position_dodge(.5)
+
+feeding_fig <- ggplot(Feeding_plotdat, aes(x=Day,y=Prop_fed,color=Treatment))+
+  geom_line()+
+  geom_point(position=pd)+
+  geom_errorbar(aes(ymin=Prop_fed-se_binom,ymax=Prop_fed+se_binom),position=pd,width=.2)+
+  theme_classic()+
+  labs(y="Proportion of snails that fed")+
+  scale_color_manual(values=color_pal,
+                     labels = c(expression(paste(0," ",mu,"g/L")),
+                                expression(paste(100," ",mu,"g/L")),
+                                expression(paste(1000," ",mu,"g/L")),
+                                expression(paste(10000," ",mu,"g/L")))
+  )+
+  theme(legend.position = "top") +
+  guides(color = guide_legend(nrow = 2))
+  #theme(legend.position=c(.9,.8)) +
+  
+feeding_fig
+ggsave(feeding_fig,filename="FeedingResults.eps",device="eps",width=3.5,height=3)
+
+
+```
+
