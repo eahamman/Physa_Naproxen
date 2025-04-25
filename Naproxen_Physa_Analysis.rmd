@@ -6,8 +6,7 @@ output:
   pdf_document: default
 ---
 # Packages and data reading
-
-```{r}
+```{r package_data}
 library(tidyverse) # formatting and tidying data
 library(glmmTMB) # performing glmms
 library(DHARMa) # model validation
@@ -15,10 +14,12 @@ library(survival) # survival analysis
 library(ggplot2) # creating figures
 library(scales)
 library(dplyr)
+library(emmeans)
+library(car)
+library(survminer)
 
 Data <- read.csv("Naproxen_Physa_rawdat.csv") # read in data
-color_pal <- rev(viridis_pal()(4))
-
+color_pal <- rev(viridis_pal()(8))[c(2,4,6,8)]
 ```
 
 
@@ -55,6 +56,7 @@ mean(OtherWeeks$Growth,na.rm=TRUE)
 # Fitting the model
 mod_growth <- glmmTMB(Growth~Week*Treatment+I(Week^2) + (1|Snail), data=Growth_data) 
 summary(mod_growth)
+Anova(mod_growth)
 
 # Model validation
 simulationOutput <- simulateResiduals(fittedModel = mod_growth, plot = T) 
@@ -76,6 +78,51 @@ growth_plot <- ggplot(Growth_data,aes(x=Week,y=Growth,fill=Treatment,group=inter
  # theme(legend.position=c(.9,.8))
   theme(legend.position="none")
 ```
+
+# Reproduction (number of egg masses)
+
+We recorded the number of eggs per snail each week.  Because these are counts, we used a Poisson glmm to analyze the data.  
+
+## Analysis
+
+```{r Reproduction}
+EggData <- Data %>% filter(Week!=0) %>% filter(Status=="alive")
+
+
+Week1 <- EggData %>% filter(Week==1)
+mean(Week1$Egg.Sacs)
+
+Week4 <- EggData %>% filter(Week==4)
+mean(Week4$Egg.Sacs)
+
+# glmm
+model_eggs <- glmmTMB(Egg.Sacs ~ Week*Treatment + (1 | Snail),
+                data = EggData,
+                family="poisson")
+
+summary(model_eggs)
+Anova(model_eggs)
+
+# model validation
+simulationOutput <- simulateResiduals(fittedModel = model_eggs, plot = T)
+
+```
+
+## Making the figure
+```{r Reproduction_fig}
+reproduction_plot <- ggplot(EggData,aes(x=Week,y=Egg.Sacs,fill=Treatment,group=interaction(Treatment,Week)))+
+  geom_boxplot()+
+  ylab("Number of egg sacs")+
+  theme_classic()+
+    scale_fill_manual(values=color_pal,
+                    labels = c(expression(paste(0," ",mu,"g/L")),
+                               expression(paste(100," ",mu,"g/L")),
+                               expression(paste(1000," ",mu,"g/L")),
+                               expression(paste(10000," ",mu,"g/L")))
+                    )+
+  theme(legend.position=c(.8,.8))
+```
+
 
 # Survival
 Performing the survival analysis using a Cox proportional hazards model implemented in the "survival" R package.  
@@ -109,22 +156,16 @@ for(i in 1:40){
 
 ## Performing the survival analysis
 
-We performed a survival analysis using a cox proportional hazards model.  To address differences among treatments, we used nested helmet contrasts asking
-
-1) Does naproxen (at all levels) affect survival relative to the control?
-
-2) Do higher than observed levels of naproxen affect snail survival moreso than observed levels?
-
-3) Does the highest level of naproxen affect snail survival mroeso than the second highest?
-
+We performed a survival analysis using a cox proportional hazards model.  
 
 ```{r Survival Contrasts}
 SurvData$TreatmentContrasts <- SurvData$Treatment # create a separate column for contrasts
-contrasts(SurvData$TreatmentContrasts) <- contr.helmert(4) # create the nested helmert contrasts
 overall_surv <- Surv(SurvData$Week,SurvData$Death) # create the survival object
 
-fit <- coxph(Surv(Week, Death)~TreatmentContrasts, data=SurvData)
-fit
+surv_fit <- coxph(Surv(Week, Death)~Treatment, data=SurvData) 
+anova(surv_fit)
+pairwise_survdiff(Surv(Week, Death)~Treatment, data=SurvData)
+
 ```
 
 
@@ -163,55 +204,12 @@ surv_plot <- ggplot(Survival_plotdat, aes(x=Week,y=Prop_alive,color=Treatment))+
   theme(legend.position="none")
 ```
 
-# Reproduction (number of egg masses)
-
-We recorded the number of eggs per snail each week.  Because these are counts, we used a Poisson glmm to analyze the data.  
-
-## Analysis
-
-```{r Reproduction}
-EggData <- Data %>% filter(Week!=0) %>% filter(Status=="alive")
-
-
-Week1 <- EggData %>% filter(Week==1)
-mean(Week1$Egg.Sacs)
-
-Week4 <- EggData %>% filter(Week==4)
-mean(Week4$Egg.Sacs)
-
-# glmm
-model_eggs <- glmmTMB(Egg.Sacs ~ Week*Treatment + (1 | Snail),
-                data = EggData,
-                family="poisson")
-
-summary(model_eggs)
-
-# model validation
-simulationOutput <- simulateResiduals(fittedModel = model_eggs, plot = T)
-
-```
-
-## Making the figure
-```{r Reproduction_fig}
-reproduction_plot <- ggplot(EggData,aes(x=Week,y=Egg.Sacs,fill=Treatment,group=interaction(Treatment,Week)))+
-  geom_boxplot()+
-  ylab("Number of egg sacs")+
-  theme_classic()+
-    scale_fill_manual(values=color_pal,
-                    labels = c(expression(paste(0," ",mu,"g/L")),
-                               expression(paste(100," ",mu,"g/L")),
-                               expression(paste(1000," ",mu,"g/L")),
-                               expression(paste(10000," ",mu,"g/L")))
-                    )+
-  theme(legend.position=c(.8,.8))
-```
-
 
 ## Combined Demographics plot 
-```{r}
+```{r combined_growthsurvivalreproduction}
 library(cowplot)
 
-p_1 <- plot_grid(growth_plot,reproduction_plot,surv_plot,ncol=3,labels=c("A","B","C"))
+p_1 <- plot_grid(growth_plot,reproduction_plot,reproduction_plot,ncol=3,labels=c("A","B","C"))
 
 ggsave(p_1,filename="DemographicResults.eps",device="eps",width=7.5,height=3)
 ```
@@ -243,6 +241,9 @@ mean(Feeding_data$Fed)
 # model & analysis
 mod_feeding <- glmmTMB(Fed~Day*Treatment + (1|Snail),data=Feeding_data,family="binomial")
 summary(mod_feeding)
+Anova(mod_feeding)
+
+
 
 L4 <- Feeding_data %>% filter(Treatment=="L4")
 otherlevels <- Feeding_data %>% filter(Treatment!="L4")
@@ -255,6 +256,8 @@ otherlevels <- Feeding_data %>% filter(Treatment!="L4")
 simulationOutput <- simulateResiduals(fittedModel = mod_feeding, plot = T)
 testDispersion(simulationOutput)
 
+feeding_posthoc <- emmeans(mod_feeding, ~ Treatment)
+pairs(feeding_posthoc)
 ```
 
 
